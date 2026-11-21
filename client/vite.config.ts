@@ -10,7 +10,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       proxy: {
-        '/socket.io': { target: `http://127.0.0.1:${PORT}`, ws: true },
+        '/api': { target: `http://127.0.0.1:${PORT}` },
       },
     },
   }

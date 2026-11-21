@@ -3,13 +3,13 @@
 ## Project Structure
 
 - `client/src/main.tsx` contains the React entry point, capture controls, and viewer UI. Keep shared styles in `client/src/style.css`.
-- `client/src/session.ts` manages Socket.IO signaling and WebRTC peer connections. `client/index.html` is the Vite entry page, and `client/vite.config.ts` configures the development WebSocket proxy.
-- `server/src/index.ts` serves the production frontend and manages in-memory rooms, participant permissions, and signaling. Build output goes to `client/dist/` and `server/dist/`.
-- `README.md` documents Windows setup, browser testing, and Cloudflare Tunnel. `.env.example` lists the server configuration.
+- `client/src/session.ts` manages LiveKit connections, WebRTC tracks, and participant updates. `client/index.html` is the Vite entry page, and `client/vite.config.ts` configures the development API proxy.
+- `server/src/rooms.ts` issues room-scoped tokens and validates permission to close rooms. `server/src/index.ts` serves the production frontend locally, and `api/room.ts` exposes the same room handler on Vercel. Build output goes to `client/dist/` and `server/dist/`.
+- `README.md` documents Vercel deployment, Windows setup, browser testing, and Cloudflare Tunnel. `.env.example` lists the server configuration.
 
 ## Build and Development
 
-Use Node.js 22.12 or newer. Run commands from the repository root.
+Use Node.js 22.22 or newer. Run commands from the repository root.
 
 - `npm install` installs dependencies.
 - `npm run dev` starts Vite at `http://127.0.0.1:5173` and Express on port 3000 by default.
@@ -22,11 +22,11 @@ Use strict TypeScript, two-space indentation, single quotes, and omit statement-
 
 ## Testing
 
-There is no checked-in automated test suite or coverage target. Run `npm run build`, then test in two browser tabs. Confirm the preview, invite link, moving video, and fullscreen. Use a third tab to check that the second viewer is rejected. Verify that both the app's stop button and the browser's capture control end the session and invalidate the link. For signaling changes, verify room isolation and role checks.
+There is no checked-in automated test suite or coverage target. Run `npm run build`, then test with a host and two viewers in separate tabs. Confirm the preview, shared invite link, moving video, participant list, and fullscreen. Verify that both the app's stop button and the browser's capture control end the session and invalidate the link. For session changes, verify room isolation and role checks.
 
 ## Security and Configuration
 
-Keep the broadcaster secret out of viewer links and logs. Treat Socket.IO messages as untrusted and validate participant roles on the server. Keep credentials in the ignored `.env` file. Use localhost or HTTPS for screen capture.
+Keep the broadcaster secret out of viewer links and logs. Treat API requests as untrusted and grant LiveKit permissions based on server-validated roles. Keep local credentials in the ignored `.env` file and production credentials in Vercel's environment variables. Use localhost or HTTPS for screen capture.
 
 ## Commits and Pull Requests
 
