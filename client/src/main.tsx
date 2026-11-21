@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Check, Link2, LogOut, Maximize, Monitor, MonitorUp, Play, SlidersHorizontal, Square, Users, Volume2, VolumeX, X } from 'lucide-react'
-import { createSession, qualities, RoomAccessError, type Participant, type RoomState } from './session'
+import { createSession, qualities, RoomAccessError, type Participant, type RoomState, type ScreenShare } from './session'
 import './style.css'
 
-type Phase = 'idle' | 'capturing' | 'connecting' | 'ready' | 'ended' | 'error'
-const emptyRoom: RoomState = { participants: [] }
+type Phase = 'idle' | 'connecting' | 'ready' | 'ended' | 'error'
+type CapturePhase = 'idle' | 'picking' | 'publishing' | 'live' | 'stopping'
+const emptyRoom: RoomState = { participants: [], shares: [] }
 const localHost: Participant = { id: 'host', name: 'Anfitrião', host: true, local: true }
 
 function Participants({ people, open }: { people: Participant[]; open: boolean }) {
@@ -24,16 +25,18 @@ function Participants({ people, open }: { people: Participant[]; open: boolean }
   </aside>
 }
 
-function usePlayback(state: RoomState) {
+function usePlayback(share?: ScreenShare) {
   const video = useRef<HTMLVideoElement>(null)
   const audio = useRef<HTMLAudioElement>(null)
   const [needsPlay, setNeedsPlay] = useState(false)
-  const [soundOn, setSoundOn] = useState(true)
+  const [sound, setSound] = useState<'playing' | 'muted' | 'blocked'>('playing')
   const [mediaError, setMediaError] = useState('')
+  const mutedByViewer = useRef(false)
+  const playbackAttempt = useRef(0)
 
   useEffect(() => {
     const element = video.current
-    const track = state.video
+    const track = share?.video
     setNeedsPlay(false)
     setMediaError('')
     if (!track || !element) return
@@ -44,30 +47,46 @@ function usePlayback(state: RoomState) {
       current = false
       track.detach(element)
     }
-  }, [state.video])
+  }, [share?.video])
+
+  function playAudio(element: HTMLAudioElement) {
+    const attempt = ++playbackAttempt.current
+    element.muted = false
+    void element.play().then(() => {
+      if (attempt === playbackAttempt.current) setSound('playing')
+    }).catch(() => {
+      if (attempt !== playbackAttempt.current) return
+      element.muted = true
+      setSound('blocked')
+    })
+  }
 
   useEffect(() => {
     const element = audio.current
-    const track = state.audio
+    const track = share?.audio
     if (!track || !element) return
-    let current = true
     track.attach(element)
-    element.muted = !soundOn
-    if (soundOn) void element.play().catch(() => { if (current) setSoundOn(false) })
+    element.muted = mutedByViewer.current
+    if (mutedByViewer.current) setSound('muted')
+    else playAudio(element)
     return () => {
-      current = false
+      playbackAttempt.current++
       track.detach(element)
     }
-  }, [state.audio, soundOn])
+  }, [share?.audio])
 
   function toggleSound() {
     const element = audio.current
-    if (soundOn || !element) {
-      setSoundOn(false)
+    if (!element) return
+    if (sound === 'playing' && !element.paused && !element.muted) {
+      playbackAttempt.current++
+      mutedByViewer.current = true
+      element.muted = true
+      setSound('muted')
       return
     }
-    element.muted = false
-    void element.play().then(() => setSoundOn(true)).catch(() => setSoundOn(false))
+    mutedByViewer.current = false
+    playAudio(element)
   }
 
   async function fullscreen() {
@@ -86,42 +105,67 @@ function usePlayback(state: RoomState) {
     void video.current?.play().then(() => setNeedsPlay(false)).catch(() => setMediaError('Não foi possível reproduzir o vídeo.'))
   }
 
-  return { video, audio, needsPlay, soundOn, mediaError, toggleSound, fullscreen, play }
+  return { video, audio, needsPlay, sound, mediaError, toggleSound, fullscreen, play }
 }
 
-function Stage({ player, hasVideo, viewer, phase, detail, onStart, onRetry }: {
+function CaptureAudio({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  return <label className="capture-audio"><input type="checkbox" checked={enabled} onChange={(event) => onChange(event.target.checked)} />Incluir áudio da tela</label>
+}
+
+function Stage({ player, share, reconnecting, viewer, phase, capturePhase, detail, audioRequested, onAudioChange, onStart, onRetry }: {
   player: ReturnType<typeof usePlayback>
-  hasVideo: boolean
+  share?: ScreenShare
+  reconnecting?: boolean
   viewer: boolean
   phase: Phase
+  capturePhase: CapturePhase
   detail: string
+  audioRequested: boolean
+  onAudioChange: (enabled: boolean) => void
   onStart?: () => void
   onRetry: () => void
 }) {
-  const title = phase === 'ended' ? 'Transmissão encerrada'
+  const hasVideo = Boolean(share?.video)
+  const localPreview = share?.presenter.local
+  const title = phase === 'ended' ? 'Sala encerrada'
     : phase === 'error' ? 'Conexão indisponível'
-    : phase === 'capturing' ? 'Escolha o que compartilhar'
-    : phase === 'connecting' ? 'Conectando à sala'
-    : viewer ? 'Aguardando a transmissão' : 'Compartilhe sua tela'
-  const message = detail || (viewer ? 'O vídeo aparece aqui quando estiver disponível.'
-    : phase === 'capturing' ? 'Use o seletor do navegador para escolher uma fonte.'
-    : phase === 'connecting' ? 'Preparando o vídeo e o link de convite.'
+    : capturePhase === 'picking' ? 'Escolha o que compartilhar'
+    : capturePhase === 'stopping' ? 'Parando o compartilhamento'
+    : phase === 'connecting' || reconnecting ? 'Conectando à sala'
+    : share?.subscriptionFailed ? 'Vídeo indisponível'
+    : capturePhase === 'publishing' || share ? 'Preparando o vídeo'
+    : viewer ? 'Aguardando o compartilhamento' : phase === 'ready' ? 'A sala continua aberta' : 'Compartilhe sua tela'
+  const message = detail || (phase === 'connecting' || reconnecting ? 'Aguarde enquanto a conexão é estabelecida.'
+    : capturePhase === 'picking' ? 'Use o seletor do navegador para escolher uma fonte.'
+    : share?.subscriptionFailed ? 'Aguarde uma nova transmissão ou escolha outra tela disponível.'
+    : share || capturePhase === 'stopping' || capturePhase === 'publishing' ? ''
+    : viewer ? 'O vídeo aparece aqui quando alguém compartilhar.'
+    : phase === 'ready' ? 'Seus amigos podem entrar pelo mesmo link. Compartilhe outra fonte quando quiser.'
     : 'Escolha uma tela, janela ou aba no navegador. Depois, envie o convite para seus amigos.')
 
-  return <section className="stage" data-video={hasVideo} aria-label={viewer ? 'Tela compartilhada' : 'Prévia da transmissão'}>
+  const captureNotice = detail || (localPreview && capturePhase === 'live' && audioRequested && !share?.hasSharedAudio
+    ? 'Sem áudio nesta transmissão. Para compartilhar som, escolha uma aba e ative o áudio no seletor do navegador.' : '')
+
+  return <section className="stage" data-video={hasVideo} aria-label={localPreview ? 'Prévia da transmissão' : 'Tela compartilhada'}>
     <video ref={player.video} hidden={!hasVideo} autoPlay playsInline muted />
     <audio ref={player.audio} />
-    {hasVideo && <span className="stage-caption"><Monitor size={15} />{viewer ? 'Tela compartilhada' : 'Sua prévia'}</span>}
+    {share && hasVideo && <span className="stage-caption"><Monitor size={15} />{localPreview ? 'Sua prévia' : `${share.presenter.name} · Tela compartilhada`}{!share.hasSharedAudio && <small>Sem áudio</small>}</span>}
     {!hasVideo && <div className="stage-empty">
       <span className="stage-symbol"><MonitorUp size={31} strokeWidth={1.65} aria-hidden="true" /></span>
       <div role={phase === 'error' ? 'alert' : 'status'}>
         <h2>{title}</h2>
-        <p>{message}</p>
+        {message && <p>{message}</p>}
       </div>
-      {onStart && <button className="button primary" onClick={onStart}><MonitorUp size={19} />Compartilhar tela</button>}
+      {onStart && <div className="capture-actions">
+        <button className="button primary" onClick={onStart}><MonitorUp size={19} />Compartilhar tela</button>
+        <CaptureAudio enabled={audioRequested} onChange={onAudioChange} />
+        {audioRequested && <p className="audio-hint">Para enviar som, escolha uma aba com áudio e ative o áudio no seletor do navegador.</p>}
+      </div>}
       {viewer && (phase === 'error' || phase === 'ended') && <button className="button secondary" onClick={onRetry}>Tentar novamente</button>}
     </div>}
     {hasVideo && player.needsPlay && <button className="button primary play" onClick={player.play}><Play size={17} />Reproduzir vídeo</button>}
+    {share?.audio && player.sound === 'blocked' && <button className="button secondary audio-resume" onClick={player.toggleSound}><Volume2 size={17} />Ativar áudio</button>}
+    {hasVideo && captureNotice && <p className="capture-notice" role="status">{captureNotice}</p>}
     {player.mediaError && <p className="media-error" role="alert">{player.mediaError}</p>}
   </section>
 }
@@ -144,13 +188,15 @@ function ElapsedTime() {
 function Workspace({ viewerId }: { viewerId?: string }) {
   const viewer = viewerId !== undefined
   const [phase, setPhase] = useState<Phase>(viewer ? 'connecting' : 'idle')
+  const [capturePhase, setCapturePhase] = useState<CapturePhase>('idle')
   const [detail, setDetail] = useState('')
   const [room, setRoom] = useState<RoomState>(emptyRoom)
+  const [selectedPresenter, setSelectedPresenter] = useState<string>()
   const [link, setLink] = useState('')
   const [copy, setCopy] = useState<'idle' | 'copied' | 'fallback'>('idle')
   const [attempt, setAttempt] = useState(0)
   const [quality, setQuality] = useState<keyof typeof qualities>('standard')
-  const [shareAudio, setShareAudio] = useState(false)
+  const [shareAudio, setShareAudio] = useState(true)
   const [peopleOpen, setPeopleOpen] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const session = useRef<ReturnType<typeof createSession> | null>(null)
@@ -159,7 +205,9 @@ function Workspace({ viewerId }: { viewerId?: string }) {
   const linkInput = useRef<HTMLInputElement>(null)
   const settingsToggle = useRef<HTMLButtonElement>(null)
   const settingsPanel = useRef<HTMLDivElement>(null)
-  const player = usePlayback(room)
+  const activeShare = room.shares.find((share) => share.presenter.id === selectedPresenter)
+    ?? room.shares.find((share) => share.video) ?? room.shares[0]
+  const player = usePlayback(activeShare)
 
   function end(nextPhase: Phase, message = '') {
     session.current?.close()
@@ -167,8 +215,11 @@ function Workspace({ viewerId }: { viewerId?: string }) {
     capture.current?.getTracks().forEach((track) => track.stop())
     capture.current = null
     setRoom(emptyRoom)
+    setSelectedPresenter(undefined)
     setLink('')
     setCopy('idle')
+    setSettingsOpen(false)
+    setCapturePhase('idle')
     setPhase(nextPhase)
     setDetail(message)
   }
@@ -187,7 +238,7 @@ function Workspace({ viewerId }: { viewerId?: string }) {
     setPhase('connecting')
     setDetail('')
     const current = createSession({ role: 'viewer', id: viewerId }, setRoom, (error) => {
-      end(error ? 'error' : 'ended', error || 'O anfitrião encerrou a transmissão ou saiu da sala.')
+      end(error ? 'error' : 'ended', error || 'O anfitrião encerrou a sala ou se desconectou.')
     })
     session.current = current
     void current.connect().then(() => {
@@ -218,14 +269,34 @@ function Workspace({ viewerId }: { viewerId?: string }) {
     settingsToggle.current?.focus()
   }
 
+  async function stopCapture(message = '') {
+    const current = session.current
+    const stream = capture.current
+    if (!stream) return
+    capture.current = null
+    stream.getTracks().forEach((track) => track.stop())
+    setCapturePhase('stopping')
+    setDetail(message)
+    try {
+      await current?.stopSharing(stream)
+    } catch {
+      if (session.current === current) setDetail('A captura parou. Se a prévia continuar visível, atualize a página.')
+    } finally {
+      if (mounted.current && session.current === current) setCapturePhase('idle')
+    }
+  }
+
   async function start() {
     setSettingsOpen(false)
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      end('error', 'Para compartilhar, abra o app em HTTPS ou localhost em um navegador desktop compatível.')
+      setDetail('Para compartilhar, abra o app em HTTPS ou localhost em um navegador desktop compatível.')
       return
     }
     const preset = qualities[quality]
-    setPhase('capturing')
+    const existing = session.current
+    if (viewer && !existing) return
+    if (!existing) setPhase('idle')
+    setCapturePhase('picking')
     setDetail('')
     let selected: MediaStream
     try {
@@ -238,38 +309,54 @@ function Workspace({ viewerId }: { viewerId?: string }) {
         },
       })
     } catch (error) {
-      if (!mounted.current) return
+      if (!mounted.current || session.current !== existing) return
       const canceled = error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'AbortError')
-      if (canceled) end('idle', 'Captura cancelada. Você pode escolher uma fonte quando quiser.')
-      else end('error', 'Não foi possível capturar a tela. Tente escolher outra fonte.')
+      setCapturePhase('idle')
+      setDetail(canceled ? 'Captura cancelada. Você pode escolher uma fonte quando quiser.' : 'Não foi possível capturar a tela. Tente escolher outra fonte.')
       return
     }
-    if (!mounted.current) {
+    if (!mounted.current || session.current !== existing) {
       selected.getTracks().forEach((track) => track.stop())
       return
     }
     capture.current = selected
     const [video] = selected.getVideoTracks()
     if (!video || video.readyState === 'ended') {
-      end('error', 'A captura foi interrompida. Selecione outra fonte para continuar.')
+      void stopCapture('A captura foi interrompida. Selecione outra fonte para continuar.')
       return
     }
     video.addEventListener('ended', () => {
-      if (capture.current === selected) end('ended', 'A captura foi interrompida no navegador.')
+      if (capture.current === selected) void stopCapture('A captura foi interrompida no navegador.')
     }, { once: true })
-    setPhase('connecting')
-    const current = createSession({ role: 'host', stream: selected, quality: preset }, setRoom, (error) => {
+    setCapturePhase('publishing')
+    const current = existing || createSession({ role: 'host' }, setRoom, (error) => {
       end(error ? 'error' : 'ended', error)
     })
     session.current = current
+    if (!existing) {
+      setPhase('connecting')
+      try {
+        const invite = await current.connect()
+        if (session.current !== current || !invite) return
+        setLink(invite)
+        setPhase('ready')
+      } catch (error) {
+        if (session.current === current) {
+          end('error', error instanceof RoomAccessError ? error.message : 'Não foi possível abrir a sala. Tente novamente.')
+        }
+        return
+      }
+    }
+
+    if (capture.current !== selected) return
     try {
-      const invite = await current.connect()
-      if (session.current !== current || !invite) return
-      setLink(invite)
-      setPhase('ready')
-    } catch (error) {
-      if (session.current !== current) return
-      end('error', error instanceof RoomAccessError ? error.message : 'Não foi possível iniciar o vídeo. Tente novamente.')
+      const presenter = await current.startSharing(selected, preset)
+      if (capture.current === selected) {
+        setSelectedPresenter(presenter)
+        setCapturePhase('live')
+      }
+    } catch {
+      if (capture.current === selected) void stopCapture('Não foi possível transmitir esta fonte. Escolha outra fonte para tentar novamente.')
     }
   }
 
@@ -283,12 +370,16 @@ function Workspace({ viewerId }: { viewerId?: string }) {
   }
 
   const people = room.participants.length || viewer ? room.participants : [localHost]
-  const broadcasting = !viewer && phase === 'ready'
-  const busy = phase === 'capturing' || phase === 'connecting'
-  const live = phase === 'ready' && Boolean(room.video)
-  const canConfigure = !viewer && !busy && !broadcasting
-  const status = room.reconnecting ? 'Reconectando' : live ? 'Ao vivo' : phase === 'capturing' ? 'Escolhendo tela'
-    : busy || phase === 'ready' ? 'Conectando' : phase === 'ended' ? 'Encerrada' : phase === 'error' ? 'Indisponível' : 'Fora do ar'
+  const broadcasting = capturePhase === 'live'
+  const busy = phase === 'connecting' || capturePhase === 'picking' || capturePhase === 'publishing' || capturePhase === 'stopping'
+  const live = phase === 'ready' && room.shares.some((share) => share.video)
+  const captureAvailable = Boolean(navigator.mediaDevices?.getDisplayMedia)
+  const canConfigure = captureAvailable && (!viewer || phase === 'ready') && !busy && !broadcasting && !room.reconnecting
+  const stageDetail = detail || (!captureAvailable && !viewer
+    ? 'Para compartilhar, abra o app em HTTPS ou localhost em um navegador desktop compatível.' : '')
+  const status = room.reconnecting ? 'Reconectando' : capturePhase === 'picking' ? 'Escolhendo tela'
+    : capturePhase === 'stopping' ? 'Parando' : busy ? 'Conectando' : live ? 'Ao vivo' : phase === 'ready' ? 'Sala aberta'
+    : phase === 'ended' ? 'Encerrada' : phase === 'error' ? 'Indisponível' : 'Fora do ar'
 
   return <div className="app-shell">
     <header className="room-header">
@@ -304,7 +395,15 @@ function Workspace({ viewerId }: { viewerId?: string }) {
 
     <main className="room-body">
       <div className="workspace" data-people={peopleOpen}>
-        <Stage player={player} hasVideo={Boolean(room.video)} viewer={viewer} phase={phase} detail={detail} onStart={canConfigure ? start : undefined} onRetry={() => setAttempt((value) => value + 1)} />
+        <div className="stage-pane">
+          <Stage player={player} share={activeShare} reconnecting={room.reconnecting} viewer={viewer} phase={phase} capturePhase={capturePhase} detail={stageDetail} audioRequested={shareAudio} onAudioChange={setShareAudio} onStart={canConfigure ? start : undefined} onRetry={() => setAttempt((value) => value + 1)} />
+          {room.shares.length > 1 && <div className="share-picker" role="group" aria-label="Telas compartilhadas">
+            <span>Telas ao vivo</span>
+            {room.shares.map(({ presenter }) => <button key={presenter.id} className="share-choice" onClick={() => setSelectedPresenter(presenter.id)} aria-pressed={activeShare?.presenter.id === presenter.id}>
+              <Monitor size={15} />{presenter.local ? 'Sua tela' : presenter.name}
+            </button>)}
+          </div>}
+        </div>
         <Participants people={people} open={peopleOpen} />
       </div>
 
@@ -322,7 +421,7 @@ function Workspace({ viewerId }: { viewerId?: string }) {
               </label>)}
             </div>
           </fieldset>
-          <label className="audio-setting"><input type="checkbox" checked={shareAudio} onChange={(event) => setShareAudio(event.target.checked)} />Áudio da tela</label>
+          {activeShare?.video && <CaptureAudio enabled={shareAudio} onChange={setShareAudio} />}
         </div>}
         {link && copy === 'fallback' && <div className="dock-tray invite-fallback">
           <label>Copie o link da sala<input ref={linkInput} readOnly aria-label="Link de convite" value={link} onFocus={(event) => event.currentTarget.select()} /></label>
@@ -330,18 +429,20 @@ function Workspace({ viewerId }: { viewerId?: string }) {
 
         <div className="dock" role="group" aria-label="Controles da sala">
           {canConfigure && <button className="dock-button" ref={settingsToggle} aria-controls="share-settings" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(!settingsOpen)}><SlidersHorizontal size={20} /><span>Ajustes</span></button>}
+          {canConfigure && activeShare?.video && <button className="dock-button share-action" aria-label="Compartilhar tela" onClick={start}><MonitorUp size={20} /><span>Compartilhar</span></button>}
           <button className="dock-button" onClick={() => setPeopleOpen(!peopleOpen)} aria-controls="people" aria-expanded={peopleOpen} aria-label="Participantes">
             <Users size={20} /><span>Pessoas <small>{people.length}</small></span>
           </button>
           {link && <button className="dock-button" onClick={copyLink} data-copied={copy === 'copied'} aria-label={copy === 'copied' ? 'Link copiado' : 'Copiar link de convite'}>
             {copy === 'copied' ? <Check size={20} /> : <Link2 size={20} />}<span>{copy === 'copied' ? 'Copiado' : 'Convite'}</span>
           </button>}
-          {room.audio && <button className="dock-button" onClick={player.toggleSound} aria-label={player.soundOn ? 'Silenciar áudio' : 'Ativar áudio'}>
-            {player.soundOn ? <Volume2 size={20} /> : <VolumeX size={20} />}<span>{player.soundOn ? 'Som' : 'Mudo'}</span>
+          {activeShare?.audio && <button className="dock-button" onClick={player.toggleSound} aria-label={player.sound === 'playing' ? 'Silenciar áudio' : 'Ativar áudio'}>
+            {player.sound === 'playing' ? <Volume2 size={20} /> : <VolumeX size={20} />}<span>{player.sound === 'playing' ? 'Som' : 'Ativar som'}</span>
           </button>}
-          {room.video && <button className="dock-button" onClick={player.fullscreen} aria-label="Tela cheia"><Maximize size={20} /><span>Tela cheia</span></button>}
-          {viewer && <a className="dock-button dock-leave" href="/" aria-label="Sair da sala" onClick={() => session.current?.close()}><LogOut size={19} /><span>Sair</span></a>}
-          {(broadcasting || (!viewer && phase === 'connecting' && capture.current)) && <button className="dock-button stop" aria-label="Parar transmissão" onClick={() => end('ended', 'Você encerrou a transmissão. O convite expirou.')}><Square size={16} /><span>Parar</span></button>}
+          {activeShare?.video && <button className="dock-button" onClick={player.fullscreen} aria-label="Tela cheia"><Maximize size={20} /><span>Tela cheia</span></button>}
+          {viewer && <a className="dock-button dock-leave" href="/" aria-label="Sair da sala" onClick={() => end('ended')}><LogOut size={19} /><span>Sair</span></a>}
+          {(broadcasting || capturePhase === 'publishing') && <button className="dock-button stop" aria-label="Parar transmissão" onClick={() => void stopCapture()}><Square size={16} /><span>Parar</span></button>}
+          {link && <button className="dock-button dock-leave" onClick={() => end('ended', 'Você encerrou a sala. O convite expirou.')}><LogOut size={19} /><span>Encerrar sala</span></button>}
         </div>
       </footer>
     </main>

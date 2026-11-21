@@ -1,8 +1,8 @@
 # ScreenShare
 
-Compartilhamento de tela pelo navegador. O anfitrião escolhe uma tela, janela ou aba e copia um único convite para todos os amigos. Quem tem o link pode assistir enquanto a transmissão estiver ativa. A sala mostra quem está conectado e permite assistir em tela cheia. A opção **Áudio da tela** depende da fonte e do navegador.
+Compartilhamento de tela pelo navegador. O anfitrião abre a sala e copia um único convite para todos os amigos. Cada participante pode compartilhar uma tela, janela ou aba. Quando houver mais de uma transmissão, escolha qual assistir em **Telas ao vivo**. O convite continua válido entre compartilhamentos enquanto o anfitrião mantiver a sala aberta. O áudio depende da fonte e do navegador.
 
-O LiveKit recebe o vídeo do anfitrião por WebRTC e o distribui aos espectadores. A Vercel serve a interface React/Vite e a função `/api/room`, que emite tokens de curta duração e valida o encerramento da sala. A capacidade da transmissão depende do plano do LiveKit e das conexões dos participantes. [Como funciona uma sala do LiveKit](https://docs.livekit.io/intro/basics/connect/)
+O LiveKit recebe o vídeo dos participantes por WebRTC e distribui as transmissões da sala. A Vercel serve a interface React/Vite e a função `/api/room`, que emite tokens de curta duração com permissão para transmitir tela e áudio da tela. O anfitrião tem a permissão de encerrar a sala. A capacidade da transmissão depende do plano do LiveKit e das conexões dos participantes. [Como funciona uma sala do LiveKit](https://docs.livekit.io/intro/basics/connect/)
 
 ## Publicar na Vercel
 
@@ -32,9 +32,11 @@ Para testar só na sua máquina sem uma conta de nuvem, baixe o LiveKit Server p
 
 1. No Chrome ou Edge desktop, selecione a qualidade, clique em **Compartilhar tela** e escolha uma fonte com conteúdo em movimento. Confira a prévia.
 2. Clique em **Copiar convite** e abra o mesmo link em duas abas ou dispositivos. Confira o movimento e os dois espectadores na lista de participantes do anfitrião. Teste **Tela cheia** em um espectador.
-3. Para testar áudio, marque **Áudio da tela**, escolha uma aba com som e habilite o áudio no seletor do navegador. Se o espectador precisar liberar a reprodução, use **Ativar áudio** no painel do vídeo.
-4. Pare pelo botão do app. Confira se os espectadores veem o encerramento e se atualizar o convite mostra que a transmissão terminou. Repita parando pelo controle nativo do navegador.
-5. Em produção, repita com um espectador usando outra rede.
+3. Deixe **Incluir áudio da tela** marcado, escolha uma aba com som e habilite o áudio no seletor do navegador. Se o navegador do espectador pedir interação, clique em **Ativar áudio** no player.
+4. Clique em **Parar**. Confira se os espectadores continuam na sala. Abra o mesmo convite em outra aba enquanto a sala está sem vídeo e volte a compartilhar. Todos devem receber o vídeo sem recarregar. Repita usando o controle nativo do navegador para parar a captura.
+5. Com o anfitrião transmitindo, clique em **Compartilhar** em uma aba de convidado. Confira as duas opções em **Telas ao vivo** e alterne entre elas em uma terceira aba. Pare a tela do convidado e confirme que a tela do anfitrião continua disponível.
+6. No anfitrião, clique em **Encerrar sala**. Os convidados devem ver o encerramento, e o convite deve expirar.
+7. Em produção, repita com um convidado usando outra rede. A captura exige HTTPS ou localhost e um navegador compatível. [Captura de tela no navegador](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getDisplayMedia)
 
 ## Usar o servidor local com outras pessoas
 

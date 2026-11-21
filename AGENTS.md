@@ -22,7 +22,7 @@ Use strict TypeScript, two-space indentation, single quotes, and omit statement-
 
 ## Testing
 
-There is no checked-in automated test suite or coverage target. Run `npm run build`, then test with a host and two viewers in separate tabs. Confirm the preview, shared invite link, moving video, participant list, and fullscreen. Verify that both the app's stop button and the browser's capture control end the session and invalidate the link. For session changes, verify room isolation and role checks.
+There is no checked-in automated test suite or coverage target. Run `npm run build`, then test with a host and two guests in separate tabs. Confirm the preview, invite, moving video, tab audio, participant list, and fullscreen. Have a guest share while the host is sharing and switch between the two screens. Verify that stopping from the app or browser keeps people in the room, that the same invite admits guests during a pause, and that only the host can end the room and invalidate the link. For session changes, verify room isolation and role checks.
 
 ## Security and Configuration
 

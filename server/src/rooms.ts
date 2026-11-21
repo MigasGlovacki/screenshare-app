@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { AccessToken, RoomServiceClient, TrackSource } from 'livekit-server-sdk'
+import { AccessToken, ParticipantInfo_State, RoomServiceClient, TrackSource } from 'livekit-server-sdk'
 
 const hostIdentity = 'host'
 const roomIdPattern = /^[a-f0-9]{32}$/
@@ -37,9 +37,9 @@ async function issueToken(config: NonNullable<ReturnType<typeof readConfig>>, id
   token.addGrant({
     room: id,
     roomJoin: true,
-    canSubscribe: !host,
-    canPublish: host,
-    canPublishSources: host ? [TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO] : undefined,
+    canSubscribe: true,
+    canPublish: true,
+    canPublishSources: [TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO],
     canPublishData: false,
   })
   return token.toJwt()
@@ -78,8 +78,8 @@ export const roomFunction = {
           if (isMissing(error)) return null
           throw error
         })
-        if (!host?.tracks.some((track) => track.source === TrackSource.SCREEN_SHARE)) {
-          return reply({ error: 'Esta transmissão já terminou ou o link não está ativo.' }, 404)
+        if (!host || host.state === ParticipantInfo_State.DISCONNECTED) {
+          return reply({ error: 'Esta sala já foi encerrada ou o link não está ativo.' }, 404)
         }
         return reply({ id, url: config.url, token: await issueToken(config, id, false) })
       }

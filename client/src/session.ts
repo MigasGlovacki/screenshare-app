@@ -6,17 +6,23 @@ export const qualities = {
 }
 export type Quality = (typeof qualities)[keyof typeof qualities]
 export type Participant = { id: string; name: string; host: boolean; local: boolean }
-export type RoomState = {
-  participants: Participant[]
+export type ScreenShare = {
+  presenter: Participant
   video?: Track
   audio?: Track
+  hasSharedAudio: boolean
+  subscriptionFailed: boolean
+}
+export type RoomState = {
+  participants: Participant[]
+  shares: ScreenShare[]
   reconnecting?: boolean
 }
 
-type SessionOptions = { role: 'host'; stream: MediaStream; quality: Quality } | { role: 'viewer'; id: string }
+type SessionOptions = { role: 'host' } | { role: 'viewer'; id: string }
 type RoomAccess = { id: string; url: string; token: string; secret?: string; viewerOrigin?: string }
 
-const endedMessage = 'Esta transmissão já terminou ou o link não está ativo.'
+const endedMessage = 'Esta sala já foi encerrada ou o link não está ativo.'
 
 export class RoomAccessError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -55,6 +61,8 @@ export function createSession(options: SessionOptions, onState: (state: RoomStat
   let access: RoomAccess | undefined
   let closed = false
   let ready = false
+  let sources: typeof Track.Source | undefined
+  let publishing: Promise<void> | undefined
 
   function close() {
     if (closed) return
@@ -82,62 +90,82 @@ export function createSession(options: SessionOptions, onState: (state: RoomStat
     ])
     if (closed) return
     access = credentials
+    sources = Track.Source
     const connection = new Room({ adaptiveStream: true, dynacast: true })
+    const failedTracks = new Set<string>()
     room = connection
 
     function sync() {
       if (closed || !ready) return
-      const participants = [connection.localParticipant, ...connection.remoteParticipants.values()].map((participant) => ({
-        id: participant.identity,
-        name: participant.name || 'Convidado',
-        host: participant.identity === 'host',
-        local: participant === connection.localParticipant,
-      }))
-      const presenter = host ? connection.localParticipant : connection.remoteParticipants.get('host')
+      const participants: Participant[] = []
+      const shares: ScreenShare[] = []
+      for (const participant of [connection.localParticipant, ...connection.remoteParticipants.values()]) {
+        const presenter = {
+          id: participant.identity,
+          name: participant.name || 'Convidado',
+          host: participant.identity === 'host',
+          local: participant === connection.localParticipant,
+        }
+        participants.push(presenter)
+        const video = participant.getTrackPublication(Track.Source.ScreenShare)
+        if (!video) continue
+        const audio = participant.getTrackPublication(Track.Source.ScreenShareAudio)
+        shares.push({
+          presenter,
+          video: video.track,
+          audio: presenter.local ? undefined : audio?.track,
+          hasSharedAudio: Boolean(audio && audio.track?.mediaStreamTrack.readyState !== 'ended'),
+          subscriptionFailed: failedTracks.has(video.trackSid),
+        })
+      }
       onState({
         participants,
-        video: presenter?.getTrackPublication(Track.Source.ScreenShare)?.track,
-        audio: host ? undefined : presenter?.getTrackPublication(Track.Source.ScreenShareAudio)?.track,
+        shares,
         reconnecting: connection.state !== ConnectionState.Connected,
       })
     }
 
-    function checkPresenter() {
+    function checkHost() {
       if (ready && !host && connection.state === ConnectionState.Connected && !connection.remoteParticipants.has('host')) finish()
     }
 
     connection.on(RoomEvent.ParticipantConnected, sync)
       .on(RoomEvent.ParticipantDisconnected, (participant) => {
         // A full reconnect removes participants before the SDK updates the connection state.
-        if (participant.identity === 'host') queueMicrotask(checkPresenter)
+        if (participant.identity === 'host') queueMicrotask(checkHost)
         sync()
       })
-      .on(RoomEvent.TrackSubscribed, sync)
+      .on(RoomEvent.TrackSubscribed, (_track, publication) => {
+        failedTracks.delete(publication.trackSid)
+        sync()
+      })
       .on(RoomEvent.TrackUnsubscribed, sync)
+      .on(RoomEvent.TrackPublished, sync)
+      .on(RoomEvent.TrackUnpublished, (publication) => {
+        failedTracks.delete(publication.trackSid)
+        sync()
+      })
+      .on(RoomEvent.LocalTrackPublished, sync)
+      .on(RoomEvent.LocalTrackUnpublished, sync)
       .on(RoomEvent.TrackSubscriptionFailed, (sid, participant) => {
-        if (participant.identity === 'host' && participant.getTrackPublication(Track.Source.ScreenShare)?.trackSid === sid) {
-          finish('Não foi possível receber o vídeo da transmissão. Tente entrar novamente.')
+        if (participant.getTrackPublication(Track.Source.ScreenShare)?.trackSid === sid) {
+          failedTracks.add(sid)
+          sync()
         }
       })
       .on(RoomEvent.ConnectionStateChanged, sync)
-      .on(RoomEvent.Reconnected, checkPresenter)
+      .on(RoomEvent.Reconnected, () => {
+        failedTracks.clear()
+        checkHost()
+        sync()
+      })
       .on(RoomEvent.Disconnected, () => {
         if (ready) finish(host ? 'A conexão com o servidor de vídeo foi perdida.' : undefined)
       })
 
-    await connection.connect(credentials.url, credentials.token, { autoSubscribe: !host })
+    await connection.connect(credentials.url, credentials.token)
     if (closed) return
-    if (options.role === 'host') {
-      const [video] = options.stream.getVideoTracks()
-      await connection.localParticipant.publishTrack(video, {
-        source: Track.Source.ScreenShare,
-        screenShareEncoding: { maxBitrate: options.quality.bitrate, maxFramerate: options.quality.fps },
-      })
-      const [audio] = options.stream.getAudioTracks()
-      if (!closed && audio?.readyState === 'live') {
-        await connection.localParticipant.publishTrack(audio, { source: Track.Source.ScreenShareAudio })
-      }
-    } else if (!connection.remoteParticipants.has('host')) {
+    if (!host && !connection.remoteParticipants.has('host')) {
       throw new RoomAccessError(endedMessage, 404)
     }
     if (closed) return
@@ -147,5 +175,46 @@ export function createSession(options: SessionOptions, onState: (state: RoomStat
     return host ? inviteLink(credentials) : undefined
   }
 
-  return { connect, close }
+  async function startSharing(stream: MediaStream, quality: Quality) {
+    const connection = room
+    const trackSources = sources
+    const [video] = stream.getVideoTracks()
+    const [audio] = stream.getAudioTracks()
+    if (closed || !ready || !connection || !trackSources || video?.readyState !== 'live' || publishing) {
+      throw new Error('A sala não está pronta para transmitir.')
+    }
+
+    const participant = connection.localParticipant
+    publishing = (async () => {
+      await participant.publishTrack(video, {
+        source: trackSources.ScreenShare,
+        screenShareEncoding: { maxBitrate: quality.bitrate, maxFramerate: quality.fps },
+      })
+      if (!closed && video.readyState === 'live' && audio?.readyState === 'live') {
+        try {
+          await participant.publishTrack(audio, { source: trackSources.ScreenShareAudio })
+        } catch {
+          audio.stop()
+        }
+      }
+    })()
+    try {
+      await publishing
+      return participant.identity
+    } finally {
+      publishing = undefined
+    }
+  }
+
+  async function stopSharing(stream: MediaStream) {
+    // Let in-flight publishing finish before removing its tracks from the room.
+    await publishing?.catch(() => undefined)
+    if (closed || !room) return
+    const participant = room.localParticipant
+    const tracks = stream.getTracks().filter((track) => participant.getTrackPublications()
+      .some((publication) => publication.track?.mediaStreamTrack === track))
+    await participant.unpublishTracks(tracks)
+  }
+
+  return { connect, close, startSharing, stopSharing }
 }
